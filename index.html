@@ -51,7 +51,7 @@ h1,h2,h3{font-weight:700; letter-spacing:-.01em; text-wrap:balance}
 .top{display:flex; justify-content:space-between; align-items:center; gap:12px; padding:16px 20px 12px; background:var(--navy); color:var(--on-navy)}
 .brand{font-weight:700; font-size:18px; letter-spacing:-.01em}
 .brand span{color:var(--on-navy-muted); font-weight:500}
-.live{display:flex; align-items:center; gap:8px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.25); border-radius:999px; padding:6px 12px; font-size:13px; cursor:pointer; color:var(--on-navy)}
+.live{display:flex; align-items:center; gap:8px; white-space:nowrap; flex:none; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.25); border-radius:999px; padding:6px 12px; font-size:13px; cursor:pointer; color:var(--on-navy)}
 .live .dot{width:8px; height:8px; border-radius:50%; background:var(--on-navy-muted)}
 .live[aria-pressed="true"] .dot{background:#5BE08F; box-shadow:0 0 0 4px rgba(91,224,143,.25)}
 
@@ -251,7 +251,7 @@ h1,h2,h3{font-weight:700; letter-spacing:-.01em; text-wrap:balance}
     <div class="screen">
       <header class="top">
         <div class="brand">StudySmart <span>· StFX</span></div>
-        <button class="live" id="live" type="button" aria-pressed="false"><span class="dot"></span><span id="liveTxt">Live demo off</span></button>
+        <button class="live" id="live" type="button" aria-pressed="false" title="Open Room 312"><span class="dot"></span><span id="liveTxt">Connecting…</span></button>
       </header>
 
       <!-- Building picker (first screen) -->
@@ -314,12 +314,7 @@ h1,h2,h3{font-weight:700; letter-spacing:-.01em; text-wrap:balance}
         <div class="zones"><i></i><i></i><i></i><span class="marker" id="sMarker"></span></div>
         <div class="labels"><span>Quiet · under 45 dB</span><span>Moderate</span><span>Loud · 60+ dB</span></div>
       </div>
-      <div class="note"><b>How the reading works:</b> a noise sensor in the room averages the volume every 30 seconds. It only measures loudness and never records audio. In this prototype, use these buttons to stand in for the sensor.</div>
-      <div class="sim">
-        <button type="button" id="minus">− Quieter</button>
-        <button type="button" id="plus" class="primary">+ Louder</button>
-        <button type="button" id="sensorToggle" class="wide">Simulate sensor going offline</button>
-      </div>
+      <div class="note" id="sNote"></div>
     </div>
   </div>
 </div>
@@ -370,7 +365,7 @@ h1,h2,h3{font-weight:700; letter-spacing:-.01em; text-wrap:balance}
           {t:'bed', label:'303', x:160, y:10, w:60, h:125, d:'b'},
           {t:'bed', label:'305', x:220, y:10, w:50, h:125, d:'b'},
           {t:'svc', label:'Kitchenette', x:270, y:10, w:60, h:125, d:'b'},
-          {t:'room', id:'r3-group', name:'Group Study Room', short:'Group Study', num:'312', kind:'Talking allowed', db:55, x:125, y:175, w:90, h:125, d:'t', changed:min(9)},
+          {t:'room', id:'r3-group', name:'Group Study Room', short:'Group Study', num:'312', kind:'Talking allowed', sensor:true, offline:true, waiting:true, db:0, x:125, y:175, w:90, h:125, d:'t', changed:null},
           {t:'bed', label:'302', x:215, y:175, w:55, h:125, d:'t'},
           {t:'bed', label:'304', x:270, y:175, w:60, h:125, d:'t'},
           {t:'bed', label:'307', x:10, y:300, w:75, h:55, d:'r'},
@@ -471,13 +466,13 @@ h1,h2,h3{font-weight:700; letter-spacing:-.01em; text-wrap:balance}
   function state(r){
     const h = hoursState(buildings[r.b]);
     if (!h.open) return {c:'grey', icon:'closed', word:'Closed', long:h.line, sub:h.short};
-    if (r.offline) return {c:'grey', icon:'none', word:'No reading', long:`Sensor offline · last reading ${ago(r.changed)}`, sub:'Offline'};
+    if (r.offline) return {c:'grey', icon:'none', word:'No reading', long: r.waiting ? 'Connecting to the sensor…' : (r.changed ? `Sensor offline · last reading ${ago(r.changed)}` : 'Sensor offline · no readings yet'), sub:'Offline'};
     if (r.db >= 60) return {c:'red', icon:'red', word:'Loud', long:'Loud talking or noise', sub:`${r.db} dB`};
     if (r.db >= 45) return {c:'orange', icon:'orange', word:'Moderate', long:'Some quiet talking', sub:`${r.db} dB`};
     return {c:'green', icon:'green', word:'Quiet', long:'Good for focused study', sub:`${r.db} dB`};
   }
   const live = r => state(r).c !== 'grey';
-  function ago(t){ const m = Math.round((Date.now()-t)/60000); if (m < 1) return 'just now'; if (m < 60) return m === 1 ? '1 min ago' : m + ' min ago'; const h = Math.round(m/60); return h === 1 ? '1 hr ago' : h + ' hrs ago'; }
+  function ago(t){ if (!t) return 'never'; const m = Math.round((Date.now()-t)/60000); if (m < 1) return 'just now'; if (m < 60) return m === 1 ? '1 min ago' : m + ' min ago'; const h = Math.round(m/60); return h === 1 ? '1 hr ago' : h + ' hrs ago'; }
 
   // Icons on a 24×24 grid: a person, plus Zs (quiet), a speech bubble (moderate), shout lines (loud),
   // a question mark (no reading) or a padlock (closed).
@@ -706,14 +701,15 @@ h1,h2,h3{font-weight:700; letter-spacing:-.01em; text-wrap:balance}
     const n = counts(f.tracked);
     const tiles = [{c:'green', word:'Quiet'}, {c:'orange', word:'Moderate'}, {c:'red', word:'Loud'}];
     document.getElementById('summary').innerHTML = tiles.map(t => `<div class="sum">${nic(t.c, t.icon)}<b>${n[t.c]}</b><span>${t.word}</span></div>`).join('');
-    const latest = Math.max(...f.tracked.filter(r => !r.offline).map(r => r.changed));
-    document.getElementById('headSub').textContent = h.open
-      ? `${f.name} · ${f.tracked.length} rooms with sensors · updated ${ago(latest)}`
-      : `${f.name} · ${h.line}`;
+    const liveRoom = f.tracked.find(r => r.sensor);
+    document.getElementById('headSub').textContent = !h.open
+      ? `${f.name} · ${h.line}`
+      : liveRoom ? `${f.name} · live sensor in Room ${liveRoom.num}` : `${f.name} · sample readings`;
     list.innerHTML = '';
     f.tracked.forEach(r => {
       const s = state(r), btn = document.createElement('button');
-      const meta = s.icon === 'none' ? `Sensor offline · last reading ${ago(r.changed)}` : s.icon === 'closed' ? (r.zone ? r.num : 'Room ' + r.num) + ' · building closed' : `${r.zone ? r.num : 'Room ' + r.num} · ${ago(r.changed)}`;
+      const place = r.zone ? r.num : 'Room ' + r.num;
+      const meta = s.icon === 'none' ? s.long : s.icon === 'closed' ? place + ' · building closed' : r.sensor ? `${place} · live · ${ago(r.changed)}` : `${place} · sample reading`;
       btn.type = 'button'; btn.className = 'card';
       btn.innerHTML =
         `<div class="art">${roomVisual(r)}</div>` +
@@ -739,18 +735,17 @@ h1,h2,h3{font-weight:700; letter-spacing:-.01em; text-wrap:balance}
     if (fresh) document.getElementById('sArt').innerHTML = roomVisual(r) + (r.photo ? '' : '<span class="photo-tag">Photo placeholder</span>');
     document.getElementById('sTitle').textContent = r.name;
     document.getElementById('sSub').textContent = `${b.name} · ${b.floors[r.floor].name} · ${r.kind}`;
-    document.getElementById('sLevel').innerHTML = `${nic(s.c, s.icon)}<div><b class="lv-${s.c}">${s.word}</b><span>${grey ? s.long : `${r.db} dB · ${s.long} · updated ${ago(r.changed)}`}</span></div>`;
+    const detail = grey ? s.long : r.sensor ? `${r.db} dB · 5-minute average · updated ${ago(r.changed)}` : `${r.db} dB · ${s.long} · sample reading`;
+    document.getElementById('sLevel').innerHTML = `${nic(s.c, s.icon)}<div><b class="lv-${s.c}">${s.word}</b><span>${detail}</span></div>`;
+    document.getElementById('sNote').innerHTML = r.sensor
+      ? '<b>Live sensor:</b> a noise sensor in this room shows the average loudness over the last 5 minutes, updated every 30 seconds. It only measures volume and never records audio.'
+      : '<b>Sample reading:</b> there is no sensor in this room yet, so this is a fixed example for the prototype.';
     document.getElementById('sMeter').hidden = grey;
     if (!grey){
       const m = document.getElementById('sMarker');
       m.style.left = Math.max(2, Math.min(98, (r.db - DB_MIN) / (DB_MAX - DB_MIN) * 100)) + '%';
       m.className = 'marker c-' + s.c;
     }
-    document.getElementById('minus').disabled = grey || r.db <= LOW;
-    document.getElementById('plus').disabled = grey || r.db >= HIGH;
-    const tog = document.getElementById('sensorToggle');
-    tog.textContent = r.offline ? 'Bring sensor back online' : 'Simulate sensor going offline';
-    tog.disabled = s.icon === 'closed';
   }
   function openSheet(id){ openId = id; renderSheet(true); phone.classList.add('sheet-open'); document.getElementById('close').focus(); }
   function closeSheet(){ phone.classList.remove('sheet-open'); openId = null; }
@@ -758,38 +753,41 @@ h1,h2,h3{font-weight:700; letter-spacing:-.01em; text-wrap:balance}
   document.getElementById('scrim').addEventListener('click', closeSheet);
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
 
-  function change(id, d){
-    const r = byId(id), n = Math.min(HIGH, Math.max(LOW, r.db + d));
-    if (n === r.db) return;
-    r.db = n; r.changed = Date.now();
+  /* ---------- Live sensor (Somers Hall, Room 312) ---------- */
+  // Reads the latest 5-minute average the ESP32 posted to ThingSpeak.
+  const SENSOR = {
+    room: 'r3-group',
+    url: 'https://api.thingspeak.com/channels/3577145/fields/1/last.json',
+    staleMinutes: 3        // no new reading for this long = "No reading"
+  };
+  const liveBtn = document.getElementById('live');
+  function updateSensorPill(){
+    const r = byId(SENSOR.room);
+    liveBtn.setAttribute('aria-pressed', String(!r.offline));
+    document.getElementById('liveTxt').textContent = r.waiting ? 'Connecting…' : r.offline ? 'Sensor offline' : 'Room 312 live';
+  }
+  async function pollSensor(){
+    const r = byId(SENSOR.room);
+    try {
+      const res = await fetch(SENSOR.url, {cache: 'no-store'});
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const d = await res.json();
+      const v = parseFloat(d && d.field1), t = Date.parse(d && d.created_at);
+      if (!isFinite(v) || !isFinite(t)) throw new Error('no reading');
+      r.db = Math.round(v);
+      r.changed = t;
+      r.offline = (Date.now() - t) > SENSOR.staleMinutes * 60000;
+    } catch (e) {
+      r.offline = true;
+    }
+    r.waiting = false;
+    updateSensorPill();
     renderAll();
   }
-  document.getElementById('plus').addEventListener('click', () => openId && change(openId, +6));
-  document.getElementById('minus').addEventListener('click', () => openId && change(openId, -6));
-  document.getElementById('sensorToggle').addEventListener('click', () => {
-    if (!openId) return;
-    const r = byId(openId);
-    r.offline = !r.offline;
-    if (!r.offline) r.changed = Date.now();
-    renderAll();
-  });
-
-  /* ---------- Live demo ---------- */
-  let timer = null;
-  const liveBtn = document.getElementById('live');
   liveBtn.addEventListener('click', () => {
-    const on = liveBtn.getAttribute('aria-pressed') !== 'true';
-    liveBtn.setAttribute('aria-pressed', String(on));
-    document.getElementById('liveTxt').textContent = on ? 'Live demo on' : 'Live demo off';
-    if (on){
-      timer = setInterval(() => {
-        const pool = all.filter(r => live(r) && (curB === null || r.b === curB));
-        if (!pool.length) return;
-        const r = pool[Math.floor(Math.random()*pool.length)];
-        const step = 3 + Math.floor(Math.random()*7);
-        change(r.id, Math.random() < 0.5 ? -step : step);
-      }, 1600);
-    } else { clearInterval(timer); timer = null; }
+    const r = byId(SENSOR.room);
+    openBuilding(r.b, r.floor);
+    openSheet(r.id);
   });
 
   function renderAll(){
@@ -798,6 +796,8 @@ h1,h2,h3{font-weight:700; letter-spacing:-.01em; text-wrap:balance}
     renderSheet(false);
   }
   renderAll();
+  pollSensor();
+  setInterval(pollSensor, 30000);
   setInterval(() => {
     if (curB === null) renderPicker();
     else { const d = hoursEl.querySelector('details'); renderHours(!!(d && d.open)); renderMaps(); renderFloorUI(); }
