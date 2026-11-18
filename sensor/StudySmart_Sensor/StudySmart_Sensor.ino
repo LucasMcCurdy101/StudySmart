@@ -1,5 +1,5 @@
 /*
-  StudySmart - noise sensor (Step 5)
+  StudySmart - noise sensor
   Somers Hall, Group Study Room 312  ->  ThingSpeak channel 3577145
 
   What it does:
@@ -8,12 +8,17 @@
     - Every 30 seconds, sends that 5-minute average to ThingSpeak (Field 1)
     - Only measures loudness. It never records or sends audio.
 
+  Wi-Fi:
+    It tries StFX eduroam first, using your StFX login in the formats StFX
+    accepts. If eduroam won't connect, it tries your phone hotspot as a backup.
+    It keeps cycling through these until one works, and measures the whole time.
+
   Wiring (INMP441 -> ESP32):
     VDD -> 3V3        GND -> GND        L/R -> GND
     SCK -> GPIO 32    WS  -> GPIO 25    SD  -> GPIO 33
 
   Blue light on the board:
-    blinking = connecting to Wi-Fi
+    blinking = connecting
     on       = connected
     off      = not connected (it keeps measuring and retries)
 
@@ -23,22 +28,23 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ESP_I2S.h>
+#if __has_include("esp_eap_client.h")
+#include "esp_eap_client.h"
+#endif
 
 // =====================  FILL THESE IN  =====================
 // Never upload this file to GitHub with your real details in it.
 
-// Which network?  true = StFX eduroam,  false = normal Wi-Fi / phone hotspot
-const bool USE_EDUROAM = false;
+// StFX eduroam
+const char* EDU_EMAIL     = "x2025abc@stfx.ca";      // your full StFX email address
+const char* EDU_PASSWORD  = "YOUR_STFX_PASSWORD";    // same password as Moodle / email
 
-// Normal Wi-Fi or phone hotspot (used when USE_EDUROAM = false)
-const char* WIFI_NAME     = "YOUR_WIFI_NAME";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+// Backup: phone hotspot (leave as-is if you don't want a backup)
+const char* HOTSPOT_NAME     = "YOUR_HOTSPOT_NAME";
+const char* HOTSPOT_PASSWORD = "YOUR_HOTSPOT_PASSWORD";
 
-// StFX eduroam (used when USE_EDUROAM = true)
-const char* EDU_LOGIN     = "x2025abc@stfx.ca";     // your full StFX email address
-const char* EDU_PASSWORD  = "YOUR_STFX_PASSWORD";   // same password as Moodle / email
-
-const char* WRITE_API_KEY = "YOUR_WRITE_API_KEY";   // ThingSpeak > API Keys > Write API Key
+// ThingSpeak > your channel > API Keys > Write API Key
+const char* WRITE_API_KEY = "YOUR_WRITE_API_KEY";
 // ===========================================================
 
 // ---------- Settings ----------
@@ -47,6 +53,7 @@ const int QUIET_BELOW    = 45;               // under this = Quiet
 const int LOUD_FROM      = 60;               // this or higher = Loud
 const int AVERAGE_SECONDS          = 300;    // average over the last 5 minutes
 const unsigned long SEND_EVERY_MS  = 30000;  // send every 30 seconds (ThingSpeak minimum is 15)
+const unsigned long WIFI_TRY_MS    = 30000;  // how long to give each Wi-Fi option
 
 // ---------- Pins ----------
 const int MIC_SCK = 32;
@@ -68,11 +75,20 @@ unsigned long lastSecond = 0;
 
 // ---------- 5-minute history (one reading per second) ----------
 float history[AVERAGE_SECONDS];
-int historyCount = 0;     // how many slots are filled (max 300)
-int historyNext  = 0;     // where the next reading goes
-
+int historyCount = 0;
+int historyNext  = 0;
 unsigned long lastSend = 0;
-unsigned long lastWifiTry = 0;
+
+// ---------- Wi-Fi options ----------
+// 0 = eduroam, login "x2025abc@stfx.ca"
+// 1 = eduroam, outer login "x2025abc@stfx.ca", inner login "x2025abc"
+// 2 = eduroam, login "x2025abc"
+// 3 = phone hotspot
+const int WIFI_OPTIONS = 4;
+int  wifiOption = -1;
+unsigned long wifiOptionStarted = 0;
+bool wasConnected = false;
+char eduShort[65];   // StFX username without "@stfx.ca"
 
 // ------------------------------------------------------------
 
@@ -82,6 +98,12 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   Serial.println();
   Serial.println("StudySmart noise sensor - Room 312");
+
+  // Make the short username, e.g. "x2025abc@stfx.ca" -> "x2025abc"
+  strncpy(eduShort, EDU_EMAIL, sizeof(eduShort) - 1);
+  eduShort[sizeof(eduShort) - 1] = '\0';
+  char* at = strchr(eduShort, '@');
+  if (at) *at = '\0';
 
   // Microphone
   mic.setPins(MIC_SCK, MIC_WS, -1, MIC_SD);
@@ -94,8 +116,9 @@ void setup() {
     mic.readBytes((char*)samples, sizeof(samples));
   }
 
-  // Wi-Fi
-  connectWifi();
+  // Wi-Fi: start the first option, then keep measuring while it connects
+  WiFi.mode(WIFI_STA);
+  nextWifiOption();
 
   lastSecond = millis();
   lastSend = millis();
@@ -103,6 +126,7 @@ void setup() {
 
 void loop() {
   readMicrophone();
+  handleWifi();
 
   // Once a second: turn the sound into a dB reading and add it to the history
   if (millis() - lastSecond >= 1000) {
@@ -111,8 +135,9 @@ void loop() {
     } else {
       float db = currentDb();
       addToHistory(db);
-      Serial.printf("Now: %5.1f dB  %-8s   5-min average: %5.1f dB (%d s of data)\n",
-                    db, levelName(db), averageDb(), historyCount);
+      Serial.printf("Now: %5.1f dB  %-8s   5-min average: %5.1f dB   Wi-Fi: %s\n",
+                    db, levelName(db), averageDb(),
+                    WiFi.status() == WL_CONNECTED ? "connected" : "connecting...");
     }
     sumSquares = 0; sampleCount = 0; zeroBlocks = 0; totalBlocks = 0;
     lastSecond = millis();
@@ -126,24 +151,87 @@ void loop() {
       if (WiFi.status() == WL_CONNECTED) {
         bool ok = sendToThingSpeak(avg);
         Serial.printf(">> Sent 5-min average %.1f dB (%s) to ThingSpeak: %s\n",
-                      avg, levelName(avg), ok ? "OK" : "FAILED");
+                      avg, levelName(avg), ok ? "OK" : "FAILED (check WRITE_API_KEY)");
       } else {
-        Serial.println(">> Not connected to Wi-Fi, reading not sent.");
+        Serial.println(">> Not connected to Wi-Fi yet, reading not sent.");
       }
     }
   }
+}
 
-  // If Wi-Fi drops, try again every 30 seconds without stopping the measurements
-  if (WiFi.status() != WL_CONNECTED) {
-    digitalWrite(LED_PIN, LOW);
-    if (millis() - lastWifiTry >= 30000) {
-      lastWifiTry = millis();
-      Serial.println("Wi-Fi lost, reconnecting...");
-      WiFi.disconnect();
-      startWifi();
-    }
+// ---------- Wi-Fi ----------
+
+bool wifiOptionUsable(int option) {
+  bool hasAt = strchr(EDU_EMAIL, '@') != NULL;
+  bool eduFilledIn = strcmp(EDU_PASSWORD, "YOUR_STFX_PASSWORD") != 0;
+  bool hotspotFilledIn = strcmp(HOTSPOT_NAME, "YOUR_HOTSPOT_NAME") != 0;
+  if (option == 0) return eduFilledIn;
+  if (option == 1 || option == 2) return eduFilledIn && hasAt;
+  if (option == 3) return hotspotFilledIn;
+  return false;
+}
+
+void startWifiOption(int option) {
+  WiFi.disconnect();
+  delay(100);
+
+  if (option <= 2) {
+    const char* outer = (option == 2) ? eduShort : EDU_EMAIL;
+    const char* inner = (option == 0) ? EDU_EMAIL : eduShort;
+    Serial.printf("\nTrying eduroam (login: %s)...\n", inner);
+    WiFi.begin("eduroam", WPA2_AUTH_PEAP, outer, inner, EDU_PASSWORD);
   } else {
+#if __has_include("esp_eap_client.h")
+    esp_wifi_sta_enterprise_disable();   // switch off the eduroam login mode
+#endif
+    Serial.printf("\nTrying hotspot \"%s\"...\n", HOTSPOT_NAME);
+    WiFi.begin(HOTSPOT_NAME, HOTSPOT_PASSWORD);
+  }
+  wifiOptionStarted = millis();
+}
+
+void nextWifiOption() {
+  for (int step = 1; step <= WIFI_OPTIONS; step++) {
+    int option = (wifiOption + step + WIFI_OPTIONS) % WIFI_OPTIONS;
+    if (wifiOptionUsable(option)) {
+      wifiOption = option;
+      startWifiOption(option);
+      return;
+    }
+  }
+  Serial.println("\nNo Wi-Fi details filled in. Add your StFX login or hotspot at the top of the code.");
+  wifiOptionStarted = millis();
+}
+
+void handleWifi() {
+  if (WiFi.status() == WL_CONNECTED) {
     digitalWrite(LED_PIN, HIGH);
+    if (!wasConnected) {
+      wasConnected = true;
+      Serial.printf("Connected to %s! IP address: %s\n",
+                    wifiOption == 3 ? HOTSPOT_NAME : "eduroam",
+                    WiFi.localIP().toString().c_str());
+      if (wifiOption <= 2) {
+        Serial.printf("(This login format worked: option %d)\n", wifiOption);
+      }
+    }
+    return;
+  }
+
+  if (wasConnected) {
+    wasConnected = false;
+    Serial.println("Wi-Fi lost. Reconnecting...");
+    startWifiOption(wifiOption);        // retry the one that worked first
+    return;
+  }
+
+  // Blink while connecting
+  digitalWrite(LED_PIN, (millis() / 250) % 2);
+
+  // Give each option 30 seconds, then try the next one
+  if (millis() - wifiOptionStarted >= WIFI_TRY_MS) {
+    Serial.println("No luck with that one.");
+    nextWifiOption();
   }
 }
 
@@ -198,39 +286,7 @@ const char* levelName(float db) {
   return "QUIET";
 }
 
-// ---------- Wi-Fi + ThingSpeak ----------
-
-// Starts joining the chosen network (doesn't wait)
-void startWifi() {
-  if (USE_EDUROAM) {
-    // eduroam uses your StFX login (PEAP / MSCHAPv2), not a shared password
-    WiFi.begin("eduroam", WPA2_AUTH_PEAP, EDU_LOGIN, EDU_LOGIN, EDU_PASSWORD);
-  } else {
-    WiFi.begin(WIFI_NAME, WIFI_PASSWORD);
-  }
-}
-
-void connectWifi() {
-  Serial.printf("Connecting to Wi-Fi \"%s\"", USE_EDUROAM ? "eduroam" : WIFI_NAME);
-  WiFi.mode(WIFI_STA);
-  startWifi();
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
-    digitalWrite(LED_PIN, !digitalRead(LED_PIN));   // blink while connecting
-    Serial.print(".");
-    delay(250);
-  }
-  lastWifiTry = millis();
-  if (WiFi.status() == WL_CONNECTED) {
-    digitalWrite(LED_PIN, HIGH);
-    Serial.printf("\nConnected! IP address: %s\n", WiFi.localIP().toString().c_str());
-  } else {
-    digitalWrite(LED_PIN, LOW);
-    Serial.println(USE_EDUROAM
-      ? "\nCould not connect yet. Check your StFX email and password. Will keep trying."
-      : "\nCould not connect yet. Check the Wi-Fi name and password. Will keep trying.");
-  }
-}
+// ---------- ThingSpeak ----------
 
 bool sendToThingSpeak(float value) {
   HTTPClient http;
