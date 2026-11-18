@@ -26,8 +26,18 @@
 
 // =====================  FILL THESE IN  =====================
 // Never upload this file to GitHub with your real details in it.
+
+// Which network?  true = StFX eduroam,  false = normal Wi-Fi / phone hotspot
+const bool USE_EDUROAM = false;
+
+// Normal Wi-Fi or phone hotspot (used when USE_EDUROAM = false)
 const char* WIFI_NAME     = "YOUR_WIFI_NAME";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+// StFX eduroam (used when USE_EDUROAM = true)
+const char* EDU_LOGIN     = "x2025abc@stfx.ca";     // your full StFX email address
+const char* EDU_PASSWORD  = "YOUR_STFX_PASSWORD";   // same password as Moodle / email
+
 const char* WRITE_API_KEY = "YOUR_WRITE_API_KEY";   // ThingSpeak > API Keys > Write API Key
 // ===========================================================
 
@@ -130,7 +140,7 @@ void loop() {
       lastWifiTry = millis();
       Serial.println("Wi-Fi lost, reconnecting...");
       WiFi.disconnect();
-      WiFi.begin(WIFI_NAME, WIFI_PASSWORD);
+      startWifi();
     }
   } else {
     digitalWrite(LED_PIN, HIGH);
@@ -190,12 +200,22 @@ const char* levelName(float db) {
 
 // ---------- Wi-Fi + ThingSpeak ----------
 
+// Starts joining the chosen network (doesn't wait)
+void startWifi() {
+  if (USE_EDUROAM) {
+    // eduroam uses your StFX login (PEAP / MSCHAPv2), not a shared password
+    WiFi.begin("eduroam", WPA2_AUTH_PEAP, EDU_LOGIN, EDU_LOGIN, EDU_PASSWORD);
+  } else {
+    WiFi.begin(WIFI_NAME, WIFI_PASSWORD);
+  }
+}
+
 void connectWifi() {
-  Serial.printf("Connecting to Wi-Fi \"%s\"", WIFI_NAME);
+  Serial.printf("Connecting to Wi-Fi \"%s\"", USE_EDUROAM ? "eduroam" : WIFI_NAME);
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_NAME, WIFI_PASSWORD);
+  startWifi();
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));   // blink while connecting
     Serial.print(".");
     delay(250);
@@ -206,7 +226,9 @@ void connectWifi() {
     Serial.printf("\nConnected! IP address: %s\n", WiFi.localIP().toString().c_str());
   } else {
     digitalWrite(LED_PIN, LOW);
-    Serial.println("\nCould not connect yet. Check the Wi-Fi name and password. Will keep trying.");
+    Serial.println(USE_EDUROAM
+      ? "\nCould not connect yet. Check your StFX email and password. Will keep trying."
+      : "\nCould not connect yet. Check the Wi-Fi name and password. Will keep trying.");
   }
 }
 
